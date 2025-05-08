@@ -3,12 +3,9 @@ import * as Haptics from 'expo-haptics';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Animated,
-  Dimensions,
-  Modal,
   PanResponder,
   StyleSheet,
   Text,
-  TouchableOpacity,
   View
 } from 'react-native';
 
@@ -21,171 +18,234 @@ export interface PinMenuItem {
 }
 
 interface PinMenuProps {
-  visible: boolean;
+  longPressPosition: { x: number, y: number } | null;
   onClose: () => void;
   onSelect: (item: PinMenuItem) => void;
   menuItems: PinMenuItem[];
-  position: { x: number; y: number };
+  showDebug?: boolean; // Opcional: mostrar elementos de depuración
 }
 
 const PinMenu: React.FC<PinMenuProps> = ({
-  visible,
+  longPressPosition,
   onClose,
   onSelect,
   menuItems,
-  position
+  showDebug = false // Por defecto, no mostrar depuración
 }) => {
+  // Visibility is determined by whether we have a longPressPosition
+  const visible = longPressPosition !== null;
+  
   // Animation values
   const overlayAnim = useRef(new Animated.Value(0)).current;
   const menuAnim = useRef(new Animated.Value(0)).current;
   
-  // Track the currently active/highlighted menu item
+  // Estado para el ítem activo
   const [activeItemIndex, setActiveItemIndex] = useState<number | null>(null);
   
-  // Track whether drag has started
-  const [isDragging, setIsDragging] = useState(false);
+  // Estado para la depuración
+  const [debugInfo, setDebugInfo] = useState({ 
+    angle: 0, 
+    adjAngle: 0, 
+    distance: 0, 
+    touchX: 0, 
+    touchY: 0,
+    phase: 'none',
+  });
+  
+  // Almacenar la última posición de toque
+  const lastTouch = useRef({ x: 0, y: 0 });
 
-  // Screen dimensions
-  const { width, height } = Dimensions.get('window');
-
-  // Calculate positions to ensure menu stays within screen bounds
-  const adjustedPosition = {
-    x: Math.min(Math.max(position.x, 100), width - 100),
-    y: Math.min(Math.max(position.y, 100), height - 100)
+  // Calcular ítem activo basado en coordenadas de toque
+  const calculateActiveItem = (touchX: number, touchY: number) => {
+    // Calcular la distancia desde el centro
+    const distance = Math.sqrt(touchX * touchX + touchY * touchY);
+    
+    // No activar ningún ítem si la distancia es muy pequeña
+    if (distance < 20) {
+      setActiveItemIndex(null);
+      return null;
+    }
+    
+    // Calcular ángulo desde el centro a la posición actual
+    let angle = Math.atan2(touchY, touchX);
+    
+    // Convertir a rango positivo si es necesario
+    if (angle < 0) angle += 2 * Math.PI;
+    
+    // Para semicírculo superior (π a 2π)
+    // Si está en semicírculo inferior (0 a π), no seleccionar ningún ítem
+    if (angle < Math.PI && angle >= 0) {
+      setActiveItemIndex(null);
+      return null;
+    }
+    
+    // Ajustar ángulo para que esté en rango 0-π (π-2π se convierte en 0-π)
+    const adjustedAngle = angle - Math.PI;
+    
+    // Calcular a qué ítem corresponde el ángulo
+    const totalItems = menuItems.length;
+    const anglePerItem = Math.PI / totalItems;
+    
+    // Calcular índice del ítem
+    const itemIndex = Math.floor(adjustedAngle / anglePerItem);
+    
+    // Asegurar que el índice está dentro de los límites
+    if (itemIndex >= 0 && itemIndex < totalItems) {
+      // Feedback háptico ligero al cambiar selección
+      if (activeItemIndex !== itemIndex) {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      }
+      setActiveItemIndex(itemIndex);
+      return itemIndex;
+    } else {
+      setActiveItemIndex(null);
+      return null;
+    }
   };
 
-  // Set up pan responder for handling drags
+  // Crear PanResponder para manejar gestos
   const panResponder = useRef(
     PanResponder.create({
+      // Interceptar todos los gestos
       onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
       onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: () => {
-        // Initial touch - set as not dragging yet
-        setIsDragging(false);
-        setActiveItemIndex(null);
-      },
-      onPanResponderMove: (event, gestureState) => {
-        // User is moving finger
-        setIsDragging(true);
+      onMoveShouldSetPanResponderCapture: () => true,
+      onPanResponderTerminationRequest: () => false,
+      
+      // Al tocar
+      onPanResponderGrant: (evt) => {
+        if (!visible || !longPressPosition) return;
         
-        // Calculate which item user is pointing to
-        // We need to get distance from the center point
-        const dx = gestureState.dx;
-        const dy = gestureState.dy;
+        // Calcular posición relativa al centro del menú
+        const touchX = evt.nativeEvent.pageX - longPressPosition.x;
+        const touchY = evt.nativeEvent.pageY - longPressPosition.y;
         
-        // Don't activate any item if the drag distance is too small (within center area)
-        const dragDistance = Math.sqrt(dx * dx + dy * dy);
-        if (dragDistance < 30) {
-          setActiveItemIndex(null);
-          return;
-        }
+        // Almacenar la última posición de toque
+        lastTouch.current = { x: touchX, y: touchY };
         
-        // Calculate angle from center to current position
-        let angle = Math.atan2(dy, dx);
-        // Convert to positive range (0 to 2π)
-        if (angle < 0) angle += 2 * Math.PI;
+        // Calcular ítem activo
+        calculateActiveItem(touchX, touchY);
         
-        // Map the angle to menu item index - for semicircle menu at the top
-        // Adjust this for your specific menu layout
-        const totalItems = menuItems.length;
-        const anglePerItem = Math.PI / (totalItems - 1);
-        
-        // For semicircle at top (π to 0)
-        // Need to convert angle from 0-2π to π-0 range for the top semicircle
-        let adjustedAngle = angle;
-        // If in bottom semicircle, don't select any item
-        if (angle > Math.PI) {
-          setActiveItemIndex(null);
-          return;
-        }
-        
-        // Map angle to item index in reverse (π = first item, 0 = last item)
-        const itemIndex = Math.floor((Math.PI - adjustedAngle) / anglePerItem);
-        
-        // Ensure index is within bounds
-        if (itemIndex >= 0 && itemIndex < totalItems) {
-          // Provide light haptic feedback when changing selection
-          if (activeItemIndex !== itemIndex) {
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-          }
-          setActiveItemIndex(itemIndex);
-        } else {
-          setActiveItemIndex(null);
+        // Actualizar depuración
+        if (showDebug) {
+          setDebugInfo({
+            angle: Math.atan2(touchY, touchX) * 180 / Math.PI,
+            adjAngle: 0,
+            distance: Math.sqrt(touchX * touchX + touchY * touchY),
+            touchX: touchX,
+            touchY: touchY,
+            phase: 'grant'
+          });
         }
       },
+      
+      // Al arrastrar
+      onPanResponderMove: (evt) => {
+        if (!visible || !longPressPosition) return;
+        
+        // Calcular posición relativa al centro del menú
+        const touchX = evt.nativeEvent.pageX - longPressPosition.x;
+        const touchY = evt.nativeEvent.pageY - longPressPosition.y;
+        
+        // Almacenar la última posición de toque
+        lastTouch.current = { x: touchX, y: touchY };
+        
+        // Calcular ítem activo
+        calculateActiveItem(touchX, touchY);
+        
+        // Actualizar depuración
+        if (showDebug) {
+          const distance = Math.sqrt(touchX * touchX + touchY * touchY);
+          let angle = Math.atan2(touchY, touchX);
+          if (angle < 0) angle += 2 * Math.PI;
+          
+          setDebugInfo({
+            angle: angle * 180 / Math.PI,
+            adjAngle: (angle - Math.PI) * 180 / Math.PI,
+            distance: distance,
+            touchX: touchX,
+            touchY: touchY,
+            phase: 'move'
+          });
+        }
+      },
+      
+      // Al soltar
       onPanResponderRelease: () => {
-        // User lifted finger - select the active item if one is highlighted
-        if (activeItemIndex !== null && isDragging) {
+        if (!visible) return;
+        
+        // Si hay un ítem activo, seleccionarlo
+        if (activeItemIndex !== null) {
           const selectedItem = menuItems[activeItemIndex];
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
           onSelect(selectedItem);
         }
+        
+        // Cerrar el menú
         onClose();
         
-        // Reset state
-        setIsDragging(false);
+        // Resetear estado
         setActiveItemIndex(null);
       },
+      
+      // Si el gesto se cancela
       onPanResponderTerminate: () => {
-        // Gesture was cancelled
-        onClose();
-        setIsDragging(false);
-        setActiveItemIndex(null);
-      },
+        if (visible) {
+          onClose();
+          setActiveItemIndex(null);
+        }
+      }
     })
   ).current;
 
+  // Configurar animaciones cuando cambia la visibilidad
   useEffect(() => {
     if (visible) {
-      // Provide haptic feedback when menu opens
+      // Feedback háptico al abrir el menú
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       
-      // Animate in
+      // Animar entrada
       Animated.parallel([
         Animated.timing(overlayAnim, {
           toValue: 1,
-          duration: 150, // Faster animation (was 200)
+          duration: 150,
           useNativeDriver: true
         }),
         Animated.timing(menuAnim, {
           toValue: 1,
-          duration: 200, // Faster animation (was 300)
+          duration: 200,
           useNativeDriver: true
         })
       ]).start();
+      
+      // Resetear estado
+      setActiveItemIndex(null);
     } else {
-      // Animate out
+      // Animar salida
       Animated.parallel([
         Animated.timing(overlayAnim, {
           toValue: 0,
-          duration: 150, // Faster animation (was 200)
+          duration: 150,
           useNativeDriver: true
         }),
         Animated.timing(menuAnim, {
           toValue: 0,
-          duration: 150, // Faster animation (was 200)
+          duration: 150,
           useNativeDriver: true
         })
       ]).start();
     }
   }, [visible]);
 
-  // Handle direct menu item press (for backwards compatibility)
-  const handleMenuItemPress = (item: PinMenuItem) => {
-    // Provide haptic feedback when menu item is selected
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    onSelect(item);
-    onClose();
-  };
-
-  // Calculate positions for radial menu items
+  // Calcular posiciones para los ítems del menú radial
   const getItemPosition = (index: number, totalItems: number) => {
-    // Arrange items in a semicircle above the touch point
-    const radius = 60; // Reduced distance from center (was 80)
-    const angleStep = Math.PI / (totalItems - 1); // Distribute items in a semicircle
-    const startAngle = Math.PI; // Start from bottom (PI radians)
+    // Disponer ítems en semicírculo superior
+    const radius = 80;
+    const angleStep = Math.PI / totalItems;
+    const startAngle = Math.PI; // Comenzar desde abajo (π radianes)
     
-    const angle = startAngle - (index * angleStep);
+    const angle = startAngle + (index * angleStep);
     
     return {
       left: radius * Math.cos(angle),
@@ -193,102 +253,139 @@ const PinMenu: React.FC<PinMenuProps> = ({
     };
   };
 
-  if (!visible) return null;
+  if (!visible || !longPressPosition) return null;
 
   return (
-    <Modal transparent visible={visible} animationType="none" onRequestClose={onClose}>
-      <Animated.View 
-        style={[
-          styles.overlay,
-          { opacity: overlayAnim }
-        ]}
+    <Animated.View 
+      style={[
+        styles.overlay,
+        { opacity: overlayAnim }
+      ]}
+    >
+      {/* Área táctil de pantalla completa con pan responder */}
+      <View 
+        style={StyleSheet.absoluteFill} 
         {...panResponder.panHandlers}
+      />
+      
+      <View 
+        style={[
+          styles.menuContainer, 
+          {
+            left: longPressPosition.x, 
+            top: longPressPosition.y 
+          }
+        ]}
       >
-        <View 
-          style={[
-            styles.menuContainer, 
-            { 
-              left: adjustedPosition.x, 
-              top: adjustedPosition.y 
+        {/* Panel de depuración - solo si showDebug es true */}
+        {showDebug && (
+          <View style={styles.debugPanel}>
+            <Text style={styles.debugText}>
+              Phase: {debugInfo.phase}{'\n'}
+              Angle: {debugInfo.angle.toFixed(0)}°{'\n'}
+              Adj Angle: {debugInfo.adjAngle.toFixed(0)}°{'\n'}
+              Distance: {debugInfo.distance.toFixed(0)}px{'\n'}
+              Touch: ({debugInfo.touchX.toFixed(0)}, {debugInfo.touchY.toFixed(0)}){'\n'}
+              Active: {activeItemIndex !== null ? activeItemIndex : 'none'}{'\n'}
+              Items: {menuItems.length}
+            </Text>
+          </View>
+        )}
+        
+        {/* Centro del menú - punto de referencia (solo en modo debug) */}
+        {showDebug && <View style={styles.centerPoint} />}
+        
+        {/* Punto que sigue al dedo (solo en modo debug) */}
+        {showDebug && (
+          <View style={[
+            styles.touchPoint,
+            {
+              left: lastTouch.current.x,
+              top: lastTouch.current.y
             }
-          ]}
-        >
-          {/* Draw a line from center to active item for visual feedback */}
-          {activeItemIndex !== null && isDragging && (
-            <View style={styles.indicatorContainer}>
-              <View 
-                style={[
-                  styles.selectionIndicator,
-                  {
-                    transform: [
-                      { rotate: `${Math.PI - activeItemIndex * (Math.PI / (menuItems.length - 1))}rad` }
-                    ]
-                  }
-                ]} 
-              />
-            </View>
-          )}
+          ]} />
+        )}
+
+        {/* Línea indicadora */}
+        {activeItemIndex !== null && (
+          <View style={styles.indicatorContainer}>
+            <View 
+              style={[
+                styles.selectionIndicator,
+                {
+                  transform: [
+                    { rotate: `${Math.PI + activeItemIndex * (Math.PI / menuItems.length)}rad` }
+                  ]
+                }
+              ]} 
+            />
+          </View>
+        )}
+        
+        {/* Ítems del menú */}
+        {menuItems.map((item, index) => {
+          const { left, top } = getItemPosition(index, menuItems.length);
+          const isActive = activeItemIndex === index;
           
-          {menuItems.map((item, index) => {
-            const { left, top } = getItemPosition(index, menuItems.length);
-            const isActive = activeItemIndex === index && isDragging;
-            
-            return (
-              <Animated.View
-                key={item.id}
+          return (
+            <Animated.View
+              key={item.id}
+              style={[
+                styles.menuItemContainer,
+                {
+                  transform: [
+                    { translateX: left },
+                    { translateY: top },
+                    { scale: menuAnim }
+                  ]
+                }
+              ]}
+            >
+              <View
                 style={[
-                  styles.menuItemContainer,
-                  {
-                    transform: [
-                      { translateX: left },
-                      { translateY: top },
-                      { scale: menuAnim },
-                      { perspective: 1000 }
-                    ]
-                  }
+                  styles.menuItem,
+                  { backgroundColor: item.color || '#ffffff' },
+                  isActive && styles.activeMenuItem
                 ]}
               >
-                <TouchableOpacity
-                  style={[
-                    styles.menuItem,
-                    { backgroundColor: item.color || '#ffffff' },
-                    isActive && styles.activeMenuItem
-                  ]}
-                  onPress={() => handleMenuItemPress(item)}
-                >
-                  <Ionicons 
-                    name={item.icon as any} 
-                    size={24} 
-                    color={isActive ? "#fff" : "#333"} 
-                  />
-                </TouchableOpacity>
-                <Text style={[
-                  styles.menuItemLabel,
-                  isActive && styles.activeMenuItemLabel
-                ]}>
-                  {item.name}
+                <Ionicons 
+                  name={item.icon as any} 
+                  size={24} 
+                  color={isActive ? "#fff" : "#333"} 
+                />
+              </View>
+              <Text style={[
+                styles.menuItemLabel,
+                isActive && styles.activeMenuItemLabel
+              ]}>
+                {item.name}
+              </Text>
+              
+              {/* Índice del ítem para depuración (solo en modo debug) */}
+              {showDebug && (
+                <Text style={styles.itemIndex}>
+                  {index}
                 </Text>
-              </Animated.View>
-            );
-          })}
-        </View>
-      </Animated.View>
-    </Modal>
+              )}
+            </Animated.View>
+          );
+        })}
+      </View>
+    </Animated.View>
   );
 };
 
 const styles = StyleSheet.create({
   overlay: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0, 0, 0, 0.4)', // Darker overlay (was 0.7 white)
-    justifyContent: 'center',
-    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.4)',
+    zIndex: 1000,
+    elevation: 1000,
   },
   menuContainer: {
     position: 'absolute',
     width: 1,
     height: 1,
-    // This is the anchor point for the radial menu
   },
   menuItemContainer: {
     position: 'absolute',
@@ -296,9 +393,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   menuItem: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+    width: 55,
+    height: 55,
+    borderRadius: 28,
     justifyContent: 'center',
     alignItems: 'center',
     elevation: 5,
@@ -308,39 +405,83 @@ const styles = StyleSheet.create({
     shadowRadius: 3,
   },
   activeMenuItem: {
-    backgroundColor: '#3498db', // Highlight color when active
-    transform: [{ scale: 1.2 }], // Slightly larger when active
+    backgroundColor: '#3498db',
+    transform: [{ scale: 1.2 }],
   },
   menuItemLabel: {
     marginTop: 4,
     fontSize: 12,
     fontWeight: '500',
-    color: 'white', // Changed from #333 to white for better visibility on dark overlay
-    backgroundColor: 'rgba(0, 0, 0, 0.6)', // Darker background for label
+    color: 'white',
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 8,
   },
   activeMenuItemLabel: {
     fontWeight: '700',
-    backgroundColor: 'rgba(52, 152, 219, 0.8)', // Matching highlight color
+    backgroundColor: 'rgba(52, 152, 219, 0.8)',
   },
   indicatorContainer: {
     position: 'absolute',
-    width: 120, // Twice the radius
-    height: 120, // Twice the radius
+    width: 160,
+    height: 160,
     alignItems: 'center',
     justifyContent: 'center',
-    marginLeft: -60, // Half of width
-    marginTop: -60, // Half of height
+    marginLeft: -80,
+    marginTop: -80,
   },
   selectionIndicator: {
     position: 'absolute',
-    width: 60, // Same as radius
-    height: 3, // Line thickness
-    backgroundColor: 'rgba(255, 255, 255, 0.6)',
-    left: 60, // Half of container width
+    width: 80,
+    height: 5,
+    backgroundColor: 'rgba(255, 255, 255, 0.8)',
+    left: 80,
     transformOrigin: 'left',
+  },
+  centerPoint: {
+    position: 'absolute',
+    width: 16,
+    height: 16,
+    backgroundColor: 'yellow',
+    borderRadius: 8,
+    left: -8,
+    top: -8,
+    zIndex: 1000,
+  },
+  touchPoint: {
+    position: 'absolute',
+    width: 16,
+    height: 16,
+    backgroundColor: 'red',
+    borderRadius: 8,
+    marginLeft: -8,
+    marginTop: -8,
+    zIndex: 1000,
+  },
+  debugPanel: {
+    position: 'absolute',
+    top: -160,
+    left: -120,
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    padding: 10,
+    borderRadius: 8,
+    width: 240,
+    zIndex: 1000,
+  },
+  debugText: {
+    color: 'white',
+    fontFamily: 'monospace',
+    fontSize: 12,
+  },
+  itemIndex: {
+    position: 'absolute',
+    top: -15,
+    color: 'white',
+    fontSize: 10,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    paddingHorizontal: 4,
+    borderRadius: 10,
   }
 });
 
